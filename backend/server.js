@@ -6,7 +6,7 @@ import connectDB from "./src/config/db.js";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRoutes from "./src/routes/auth.js";
-import locationRoutes from "./src/routes/locations.js";
+import locationRoutes from "./src/routes/location.js";
 import sessionRoutes from "./src/routes/sessions.js";
 import { initSocketHandlers } from "./src/socket/index.js";
 

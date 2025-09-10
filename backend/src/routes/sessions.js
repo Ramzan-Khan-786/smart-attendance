@@ -3,7 +3,7 @@ import Session from "../models/Session.js";
 import Attendance from "../models/Attendance.js";
 import Location from "../models/Location.js";
 import User from "../models/User.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middlewares/auth.js";
 import { metersBetween } from "../utils/geo.js";
 import ExcelJS from "exceljs";
 

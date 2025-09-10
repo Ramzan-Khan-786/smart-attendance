@@ -1,6 +1,6 @@
 import express from "express";
 import Location from "../models/Location.js";
-import { requireAuth, requireRole } from "../middleware/auth.js";
+import { requireAuth, requireRole } from "../middlewares/auth.js";
 
 const router = express.Router();
 
