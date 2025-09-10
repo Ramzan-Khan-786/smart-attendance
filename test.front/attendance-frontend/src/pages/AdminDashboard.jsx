@@ -1,162 +1,270 @@
-import React, { useState, useEffect } from "react";
-import * as api from "../services/api";
-import MapPicker from "../components/MapPicker";
+// frontend/src/pages/AdminDashboard.jsx
+import React, { useEffect, useState } from "react";
+import MapArea from "../components/MapArea";
+import api from "../services/api";
+import { io } from "socket.io-client";
 
 export default function AdminDashboard() {
   const [locations, setLocations] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [newLocName, setNewLocName] = useState("");
-  const [newLocCoords, setNewLocCoords] = useState(null);
-  const [geofenceActive, setGeofenceActive] = useState(false);
+  const [active, setActive] = useState(null);
+  const [selectedGeo, setSelectedGeo] = useState(null);
+  const [sessionName, setSessionName] = useState("");
+  const [presentUsers, setPresentUsers] = useState([]);
+  const [me, setMe] = useState({});
+  const [drawMode, setDrawMode] = useState(false);
+  const [socket, setSocket] = useState(null);
 
   useEffect(() => {
-    fetchLocations();
+    fetchInitial();
+    const s = io(window.location.origin); // adjust if socket server on different origin
+    setSocket(s);
+
+    s.on("connect", () => console.log("socket connected", s.id));
+    s.on("geofence:updated", (data) => {
+      // refresh active geofence
+      fetchActive();
+    });
+    s.on("attendance:checked-in", (payload) => {
+      // if payload.sessionId === active._id then add to presentUsers
+      if (!active) return;
+      if (String(payload.sessionId) === String(active._id)) {
+        setPresentUsers((prev) => {
+          const exists = prev.find(
+            (p) => String(p._id) === String(payload.user._id)
+          );
+          if (exists) return prev;
+          return [...prev, { ...payload.user, checkInAt: payload.checkInAt }];
+        });
+      }
+    });
+
+    return () => {
+      s.disconnect();
+    };
+    // eslint-disable-next-line
   }, []);
 
-  async function fetchLocations() {
+  useEffect(() => {
+    const iv = setInterval(() => {
+      fetchActive();
+    }, 5000);
+    return () => clearInterval(iv);
+  }, []);
+
+  async function fetchInitial() {
     try {
-      const res = await api.getLocations();
-      setLocations(res.data);
-    } catch (err) {
-      console.warn(err);
+      const res = await api.get("/geofence/list");
+      setLocations(res.data || []);
+      const meRes = await api.get("/users/me");
+      setMe(meRes.data || {});
+      await fetchActive();
+    } catch (e) {
+      console.error(e);
     }
   }
 
-  async function addLocation() {
-    if (!newLocName || !newLocCoords) return alert("Name and coords required");
+  async function fetchActive() {
     try {
-      await api.addLocation({
-        name: newLocName,
-        lat: newLocCoords[0],
-        lng: newLocCoords[1],
+      const r = await api.get("/geofence/active");
+      setActive(r.data || null);
+      if (r.data) {
+        const p = await api.get(`/attendance/present?sessionId=${r.data._id}`);
+        setPresentUsers(p.data || []);
+      } else {
+        setPresentUsers([]);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function handleStart() {
+    if (!selectedGeo || !sessionName)
+      return alert("Choose a location and enter a session name");
+    try {
+      await api.post("/geofence/start", {
+        geofenceId: selectedGeo._id,
+        sessionName,
       });
-      setNewLocName("");
-      setNewLocCoords(null);
-      fetchLocations();
+      await fetchActive();
+      if (socket) socket.emit("geofence:updated", { action: "started" });
     } catch (err) {
-      alert("error adding");
+      alert(err.response?.data?.error || err.message);
     }
   }
 
-  async function startGeofence() {
-    if (!selected) return alert("select location");
+  async function handleStop() {
     try {
-      await api.startGeofence({ locationId: selected });
-      setGeofenceActive(true);
-      alert("Geofence started");
+      await api.post("/geofence/stop");
+      await fetchActive();
+      if (socket) socket.emit("geofence:updated", { action: "stopped" });
     } catch (err) {
-      alert("error starting");
+      alert(err.response?.data?.error || err.message);
     }
   }
 
-  async function closeGeofence() {
+  async function handleCreateCustom(coords) {
+    // coords: { type: 'circle', center:{lat,lng}, radius } OR {type:'polygon', polygon:[{lat,lng}...]}
     try {
-      await api.closeGeofence();
-      setGeofenceActive(false);
-      alert("Geofence closed and attendance exported.");
+      const name = prompt("Name for this location (eg: Gate A - Ground floor)");
+      if (!name) return alert("Name required");
+      const res = await api.post("/geofence/create", { name, coords });
+      // refresh list & auto-select
+      setLocations((prev) => [res.data, ...prev]);
+      setSelectedGeo(res.data);
+      setDrawMode(false);
     } catch (err) {
-      alert("error closing");
+      alert(err.response?.data?.error || err.message);
     }
   }
 
-  async function pickCurrentLocation() {
-    if (!navigator.geolocation) return alert("No geolocation");
-    navigator.geolocation.getCurrentPosition(
-      (p) => {
-        setNewLocCoords([p.coords.latitude, p.coords.longitude]);
-      },
-      () => alert("Please allow location access")
-    );
-  }
+  const isOwner =
+    active && active.activatedBy && active.activatedBy._id === me._id;
+  const anyActive = !!active;
 
   return (
-    <div className="container">
-      <section className="card" style={{ marginBottom: 12 }}>
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "380px 1fr",
+        gap: 18,
+        padding: 18,
+      }}
+    >
+      <div style={{ padding: 12 }}>
         <h2>Admin Dashboard</h2>
-        <p style={{ color: "#555" }}>
-          Manage saved locations and start/stop geofence sessions.
-        </p>
-      </section>
 
-      <section className="card" style={{ marginBottom: 12 }}>
-        <h3>Pre-saved Locations</h3>
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            flexWrap: "wrap",
-            marginTop: 8,
-          }}
-        >
-          {locations.map((l) => (
-            <button
-              key={l._id}
-              onClick={() => setSelected(l._id)}
-              className={`small ${selected === l._id ? "btn" : ""}`}
-              style={{ border: "1px solid #eee" }}
-            >
-              {l.name} ({l.lat.toFixed(4)},{l.lng.toFixed(4)})
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="card" style={{ marginBottom: 12 }}>
-        <h3>Add Custom Location</h3>
-        <div
-          style={{ display: "grid", gridTemplateColumns: "1fr 220px", gap: 12 }}
-        >
-          <div>
-            <div className="form-row">
-              <label>Name</label>
-              <input
-                value={newLocName}
-                onChange={(e) => setNewLocName(e.target.value)}
-              />
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button className="btn small" onClick={pickCurrentLocation}>
-                Use current location
-              </button>
-              <button className="btn small" onClick={addLocation}>
-                Add location
-              </button>
-            </div>
-            {newLocCoords && (
-              <p style={{ marginTop: 8 }}>
-                Selected: {newLocCoords[0].toFixed(5)},{" "}
-                {newLocCoords[1].toFixed(5)}
-              </p>
-            )}
+        <section style={{ marginTop: 12 }}>
+          <h4>Presaved locations</h4>
+          <div
+            style={{
+              maxHeight: 220,
+              overflowY: "auto",
+              border: "1px solid #eee",
+              borderRadius: 6,
+            }}
+          >
+            {locations.map((l) => (
+              <div
+                key={l._id}
+                style={{ padding: 8, borderBottom: "1px solid #fafafa" }}
+              >
+                <div style={{ fontWeight: 600 }}>{l.name}</div>
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  {l.coords.type}
+                </div>
+                <div style={{ marginTop: 6 }}>
+                  <button onClick={() => setSelectedGeo(l)}>Choose</button>
+                </div>
+              </div>
+            ))}
           </div>
+        </section>
+
+        <section style={{ marginTop: 14 }}>
+          <h4>Add custom location</h4>
+          <div style={{ marginBottom: 8 }}>
+            <button
+              onClick={() => setDrawMode((v) => !v)}
+              style={{ marginRight: 8 }}
+            >
+              {drawMode ? "Cancel drawing" : "Draw on map"}
+            </button>
+            <span style={{ color: "#666" }}>
+              {" "}
+              Use draw tool on the map to add circle/polygon
+            </span>
+          </div>
+        </section>
+
+        <section style={{ marginTop: 14 }}>
+          <h4>Geofence control</h4>
           <div>
-            <MapPicker
-              value={newLocCoords}
-              onChange={(v) => setNewLocCoords(v)}
+            <label>Session name</label>
+            <input
+              value={sessionName}
+              onChange={(e) => setSessionName(e.target.value)}
+              placeholder="Session name"
             />
           </div>
-        </div>
-      </section>
+          <div style={{ marginTop: 8 }}>
+            <button
+              onClick={handleStart}
+              disabled={anyActive && !isOwner}
+              style={{
+                opacity: anyActive && !isOwner ? 0.45 : 1,
+                marginRight: 8,
+              }}
+            >
+              Start geofence
+            </button>
 
-      <section className="card">
-        <h3>Geofence Controls</h3>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            className="btn small"
-            onClick={startGeofence}
-            disabled={geofenceActive}
+            <button
+              onClick={handleStop}
+              disabled={!anyActive || !isOwner}
+              style={{ opacity: !anyActive || !isOwner ? 0.45 : 1 }}
+            >
+              Close geofence
+            </button>
+          </div>
+
+          {active && (
+            <div
+              style={{
+                marginTop: 10,
+                padding: 8,
+                background: "#f3f8ff",
+                borderRadius: 6,
+              }}
+            >
+              <div>
+                <strong>Active:</strong> {active.sessionName}
+              </div>
+              <div>By: {active.activatedByName}</div>
+              <div>Started: {new Date(active.startedAt).toLocaleString()}</div>
+            </div>
+          )}
+        </section>
+
+        <section style={{ marginTop: 14 }}>
+          <h4>Who is present till now</h4>
+          <div
+            style={{
+              maxHeight: 180,
+              overflowY: "auto",
+              border: "1px solid #eee",
+              borderRadius: 6,
+              padding: 8,
+            }}
           >
-            Start Geofence
-          </button>
-          <button
-            className="btn small"
-            onClick={closeGeofence}
-            disabled={!geofenceActive}
-          >
-            Close Geofence
-          </button>
-        </div>
-      </section>
+            {presentUsers.length ? (
+              presentUsers.map((u) => (
+                <div
+                  key={u._id}
+                  style={{ padding: 6, borderBottom: "1px solid #fafafa" }}
+                >
+                  <div style={{ fontWeight: 600 }}>{u.name}</div>
+                  <div style={{ fontSize: 12, color: "#666" }}>
+                    {u.employeeId || ""} •{" "}
+                    {new Date(u.checkInAt).toLocaleString()}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div style={{ color: "#666" }}>No check-ins yet</div>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div>
+        <MapArea
+          center={[19.386, 72.858]}
+          activeGeofence={active}
+          drawMode={drawMode}
+          onCreateGeofence={handleCreateCustom}
+        />
+      </div>
     </div>
   );
 }

@@ -1,102 +1,118 @@
+// frontend/src/pages/UserDashboard.jsx
 import React, { useEffect, useState } from "react";
-import * as api from "../services/api";
-import CameraCapture from "../components/CameraCapture";
+import MapArea from "../components/MapArea";
+import api from "../services/api";
+import { pointInCircle, pointInPolygon } from "../utils/geo";
+import { io } from "socket.io-client";
 
 export default function UserDashboard() {
-  const [sessions, setSessions] = useState([]);
-  const [status, setStatus] = useState("");
-  const [selfVerifyOpen, setSelfVerifyOpen] = useState(false);
+  const [active, setActive] = useState(null);
+  const [status, setStatus] = useState("idle"); // idle, inside, outside, checked-in
+  const [socket, setSocket] = useState(null);
 
   useEffect(() => {
-    fetchSessions();
+    fetchActive();
+    const s = io(window.location.origin);
+    setSocket(s);
+    s.on("connect", () => console.log("user socket connected", s.id));
+    s.on("geofence:updated", () => fetchActive());
+    s.on("attendance:checked-in", (payload) => {
+      if (active && String(payload.sessionId) === String(active._id)) {
+        // another user checked in — no need to do anything special
+      }
+    });
+    return () => s.disconnect();
+    // eslint-disable-next-line
   }, []);
 
-  async function fetchSessions() {
+  useEffect(() => {
+    const iv = setInterval(fetchActive, 5000);
+    return () => clearInterval(iv);
+  }, []);
+
+  async function fetchActive() {
     try {
-      const res = await api.getActiveSessions();
-      setSessions(res.data);
+      const r = await api.get("/geofence/active");
+      setActive(r.data || null);
+      if (r.data) {
+        // attempt to check-in if inside
+        tryAutoCheckin(r.data);
+      } else {
+        setStatus("idle");
+      }
     } catch (err) {
-      console.warn(err);
+      console.error(err);
     }
   }
 
-  async function checkLocation(session) {
-    if (!navigator.geolocation) return alert("Allow location");
+  async function tryAutoCheckin(activeGeofence) {
+    if (!navigator.geolocation) {
+      setStatus("no-geolocation");
+      return;
+    }
+
     navigator.geolocation.getCurrentPosition(
-      async (p) => {
-        try {
-          const res = await api.checkInsideGeofence({
-            lat: p.coords.latitude,
-            lng: p.coords.longitude,
-            sessionId: session._id,
-          });
-          setStatus(res.data.message);
-        } catch (err) {
-          console.warn(err);
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+
+        let inside = false;
+        const gf = activeGeofence.geofence;
+        if (gf.coords.type === "circle") {
+          inside = pointInCircle(
+            { lat, lng },
+            gf.coords.center,
+            gf.coords.radius || 50
+          );
+        } else if (gf.coords.type === "polygon") {
+          inside = pointInPolygon({ lat, lng }, gf.coords.polygon || []);
+        }
+
+        if (inside) {
+          setStatus("inside");
+          // call backend checkin
+          try {
+            const res = await api.post("/attendance/checkin", { lat, lng });
+            if (res.data?.success) {
+              setStatus("checked-in");
+            } else {
+              setStatus("checkin-failed");
+            }
+          } catch (err) {
+            setStatus("checkin-failed");
+            console.error(err);
+          }
+        } else {
+          setStatus("outside");
         }
       },
-      () => alert("Allow location access")
+      (err) => {
+        console.error(err);
+        setStatus("geo-permission-denied");
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
     );
   }
 
-  async function onCapture(blob) {
-    const fd = new FormData();
-    fd.append("image", blob, "selfie.jpg");
-    try {
-      const res = await api.uploadSelfie(fd);
-      alert(res.data.message || "Verification result received");
-      setSelfVerifyOpen(false);
-    } catch (err) {
-      alert(err?.response?.data?.message || "verify error");
-    }
-  }
-
   return (
-    <div className="container">
-      <section className="card">
-        <h2>User Dashboard</h2>
-        <p style={{ color: "#555" }}>
-          See active sessions and verify attendance. If camera auto-recognition
-          fails, use self-verify.
-        </p>
-      </section>
+    <div style={{ padding: 12 }}>
+      <h2>User Dashboard</h2>
 
-      <section className="card" style={{ marginTop: 12 }}>
-        <h3>Active Sessions</h3>
-        {sessions.length === 0 && <p>No active sessions right now.</p>}
-        <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
-          {sessions.map((s) => (
-            <div
-              key={s._id}
-              style={{
-                padding: 12,
-                border: "1px solid #eee",
-                borderRadius: 8,
-              }}
-            >
-              <strong>{s.name}</strong>
-              <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-                <button className="btn small" onClick={() => checkLocation(s)}>
-                  Check location
-                </button>
-                <button
-                  className="btn small"
-                  onClick={() => setSelfVerifyOpen(true)}
-                >
-                  Self-Verify
-                </button>
-              </div>
-            </div>
-          ))}
+      {active ? (
+        <div style={{ marginBottom: 8 }}>
+          <div>
+            <strong>Session:</strong> {active.sessionName}
+          </div>
+          <div>
+            <strong>Admin:</strong> {active.activatedByName}
+          </div>
+          <div style={{ marginTop: 6 }}>Status: {status}</div>
         </div>
-      </section>
-
-      {selfVerifyOpen && (
-        <section className="card" style={{ marginTop: 12 }}>
-          <h3>Self-Verify (Take a selfie)</h3>
-          <CameraCapture onCapture={onCapture} />
-        </section>
+      ) : (
+        <div style={{ color: "#666", marginBottom: 8 }}>No active geofence</div>
       )}
+
+      <MapArea center={[19.386, 72.858]} activeGeofence={active} />
     </div>
   );
 }

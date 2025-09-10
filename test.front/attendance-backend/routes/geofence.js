@@ -1,65 +1,87 @@
-import express from "express";
-import Session from "../models/Session.js";
-import Location from "../models/Location.js";
-import ExcelJS from "exceljs";
-
-const router = express.Router();
-
-// start geofence
-router.post("/start", async (req, res) => {
-  const { locationId } = req.body;
-  const session = await Session.create({ location: locationId });
-  res.json(session);
+import express from 'express';
+try {
+const { name, coords } = req.body; // coords as described in model
+const created = await Geofence.create({ name, coords, createdBy: req.user?._id });
+res.json(created);
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
 });
 
-// close geofence + export attendance
-router.post("/close", async (req, res) => {
-  const session = await Session.findOne({ active: true }).populate(
-    "attendees.user"
-  );
-  if (!session) return res.status(400).json({ message: "No active session" });
 
-  session.active = false;
-  await session.save();
-
-  // export to Excel
-  const workbook = new ExcelJS.Workbook();
-  const sheet = workbook.addWorksheet("Attendance");
-  sheet.addRow(["Name", "Email", "Verified"]);
-
-  session.attendees.forEach((a) => {
-    sheet.addRow([a.user.name, a.user.email, a.verified ? "Yes" : "No"]);
-  });
-
-  const filePath = `./uploads/attendance-${Date.now()}.xlsx`;
-  await workbook.xlsx.writeFile(filePath);
-
-  res.json({ message: "Session closed", file: filePath });
+// List presaved geofences
+router.get('/list', async (req, res) => {
+try {
+const list = await Geofence.find().lean();
+res.json(list);
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
 });
 
-router.post("/check", async (req, res) => {
-  const { lat, lng, sessionId } = req.body;
-  const session = await Session.findById(sessionId).populate("location");
-  if (!session || !session.active)
-    return res.status(400).json({ message: "Session not active" });
 
-  // simple radius check (100m)
-  const R = 6371000;
-  const toRad = (deg) => (deg * Math.PI) / 180;
-  const dLat = toRad(session.location.lat - lat);
-  const dLon = toRad(session.location.lng - lng);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat)) *
-      Math.cos(toRad(session.location.lat)) *
-      Math.sin(dLon / 2) ** 2;
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const dist = R * c;
-
-  if (dist <= 100) {
-    return res.json({ message: "Inside geofence" });
-  }
-  res.json({ message: "Outside geofence" });
+// Get active geofence (if any)
+router.get('/active', async (req, res) => {
+try {
+const active = await ActiveGeofence.findOne().populate('geofence').populate('activatedBy','name');
+res.json(active || null);
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
 });
+
+
+// Start a geofence session (only allowed if there is no active one)
+router.post('/start', async (req, res) => {
+try {
+// req.user expected from auth middleware
+const user = req.user;
+const { geofenceId, sessionName } = req.body;
+
+
+const existing = await ActiveGeofence.findOne();
+if (existing) return res.status(400).json({ error: 'A geofence is already active' });
+
+
+const gf = await Geofence.findById(geofenceId);
+if (!gf) return res.status(404).json({ error: 'Geofence not found' });
+
+
+const active = await ActiveGeofence.create({
+geofence: gf._id,
+sessionName,
+activatedBy: user._id,
+activatedByName: user.name
+});
+
+
+res.json({ success: true, active });
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
+});
+
+
+// Stop the active geofence (only owner should be able to stop)
+router.post('/stop', async (req, res) => {
+try {
+const user = req.user;
+const active = await ActiveGeofence.findOne().populate('activatedBy');
+if (!active) return res.status(400).json({ error: 'No active geofence' });
+
+
+// Only the admin who started it (or superadmin) may stop it
+if (active.activatedBy && String(active.activatedBy._id) !== String(user._id)) {
+return res.status(403).json({ error: 'Only the admin who started this geofence can stop it' });
+}
+
+
+await ActiveGeofence.deleteOne({ _id: active._id });
+res.json({ success: true });
+} catch (err) {
+res.status(500).json({ error: err.message });
+}
+});
+
 
 export default router;
