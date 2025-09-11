@@ -9,8 +9,9 @@ import geofenceRoutes from "./routes/geofence.js";
 import sessionRoutes from "./routes/session.js";
 import attendanceRoutes from "./routes/attendance.js";
 import http from "http";
-import express from "express";
 import setupSocket from "./socket.js";
+import authMiddleware from "./middleware/auth.js";
+
 
 dotenv.config();
 connectDB();
@@ -26,7 +27,6 @@ const allowedOrigins = [
 app.use(
   cors({
     origin: function (origin, callback) {
-      // allow requests with no origin (like mobile apps or curl)
       if (!origin) return callback(null, true);
       if (allowedOrigins.indexOf(origin) === -1) {
         const msg = `CORS policy: This origin is not allowed -> ${origin}`;
@@ -48,7 +48,6 @@ app.use("/api/geofence", authMiddleware, geofenceRoutes);
 app.use("/sessions", sessionRoutes);
 
 const PORT = process.env.PORT || 5000;
-// app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 const server = http.createServer(app);
 const io = setupSocket(server, app);
